@@ -31,7 +31,7 @@ mqttPort = 1883
 mqttFlag = False
 client = mqtt.Client()
 
-#port = serial.Serial("/dev/ttyAMA0", baudrate=9600, timeout=3.0)
+#port = serial.Serial("/dev/ttyAMA0", baudrate=9600, timeout=1.0)
 port = serial.Serial("/dev/ttyAMA0", baudrate=9600)
 
 GPIO.setmode(GPIO.BCM)
@@ -129,11 +129,12 @@ def openDoor():
     global myIP
     global doorCheckTime
     global doorTime
-    global Cur_Lock_State
-    if params['isSound'] == True:
+    if params['isSound'] == 'True':
         pygame.mixer.music.stop()
         pygame.mixer.music.load("/home/pi/Zamknulo.mp3")
         pygame.mixer.music.play()
+        while (pygame.mixer.music.get_busy() == True ):
+            continue
     params['lockState']="opened"
     conn = sqlite3.connect(dbName)
     req = conn.cursor()
@@ -144,6 +145,7 @@ def openDoor():
     if mqttFlag:
         client.publish("LOCKASK",myIP + "/OPENED")
     doorTime = millis()
+    doorCheckTime = 10000
 
 def closeDoor():
     global dbName
@@ -166,9 +168,11 @@ def closeDoor():
     GPIO.output(4,True)
     if mqttFlag:
         client.publish("LOCKASK",myIP + "/CLOSED")
-    if params['isSound'] == True:
+    if params['isSound'] == 'True':
         pygame.mixer.music.load("/home/pi/Zaschitnoe_pole.mp3")
         pygame.mixer.music.play(loops=-1)
+    doorTime = 0
+    doorCheckTime = 0
     
 def testAccess(Input):
     global dbName
@@ -184,16 +188,15 @@ def testAccess(Input):
     if Input not in codes.keys():
         if mqttFlag:
             client.publish("LOCKASK", myIP + "/CODE/GLOBALWRONG/" + Input)
-        return ()
+        return()
     if params['baseState'] not in codes[Input]:
         if mqttFlag:
             client.publish("LOCKASK", myIP + "/CODE/STATUSWRONG/" + Input)
-        return ()
+        return()
     else:
         if mqttFlag:
             client.publish("LOCKASK", myIP + "/CODE/RIGHT/" + Input)
         if(params['lockState'] == 'closed'):
-            doorCheckTime = 10000
             openDoor()
 
 def serialAsk():
@@ -203,23 +206,25 @@ def serialAsk():
         portByte = port.readline()
         byte = portByte.decode('utf-8')
         if (byte != ''):
+            RDType = byte[2:4]
+            RDValue = str(byte[4:])
+            RDValue = RDValue.strip()
             if params['lockState'] == 'closed':
-                RDType = byte[2:4]
-                RDValue = str(byte[4:])
-                RDValue = RDValue.strip()
                 if(RDType == 'KB'):			# Key pressed
                     if(int(RDValue) == 10):
                         inpSeq = ''
                     else: 
                         if(int(RDValue) == 11):
+                            print (inpSeq)
                             testAccess(inpSeq)
                         else:
                             inpSeq += RDValue
                 else:					# Card detected
                     inpSeq = RDValue
+                    print (inpSeq)
                     testAccess(inpSeq)
                     inpSeq = ''
-            else:
+            elif(RDType == 'CD'):
                 conn = sqlite3.connect(dbName)
                 req = conn.cursor()
                 req.execute("UPDATE params SET value = 'closed' WHERE name = 'lockState'")
@@ -235,35 +240,36 @@ def checkDB():
     global params
     global codes
     global params
-    curTime = millis()
-    if curTime >= (dbTime + dbCheckTime):
-        oldState = params['lockState']
-        conn = sqlite3.connect(dbName)
-        req = conn.cursor()
-        jsStr = '{'
-        for row in req.execute("SELECT * FROM params"):
-            jsStr += '"' + row[0] + '":"' + row[1] + '",'
-        jsStr = jsStr.rstrip(',') + '}'
-        params = json.loads(jsStr)
-        jsStr = '{'
-        for row in req.execute("SELECT * FROM codes"):
-            val = row[1].split(',')
-            jsStr += '"' + row[0] + '":['
-            for valStr in val:
-                jsStr += '"' + valStr + '",'
-            jsStr = jsStr.rstrip(',') + '],'
-        jsStr = jsStr.rstrip(',') + '}'
-        codes = json.loads(jsStr)
-        conn.close()
-        if(oldState != params['lockState']):		# Status changed
-            if(params['lockState'] == 'opened'):			# Lock opened from server
-                doorCheckTime = 0
-                openDoor()
-            else:				# Lock closed from server
-                closeDoor()
-        dbTime = curTime
-    if curTime >= (doorTime + doorCheckTime) and params['lockState'] == 'opened' and doorCheckTime != 0:
-        closeDoor()
+    while True:
+        curTime = millis()
+        if curTime >= (dbTime + dbCheckTime):
+            oldState = params['lockState']
+            conn = sqlite3.connect(dbName)
+            req = conn.cursor()
+            jsStr = '{'
+            for row in req.execute("SELECT * FROM params"):
+                jsStr += '"' + row[0] + '":"' + row[1] + '",'
+            jsStr = jsStr.rstrip(',') + '}'
+            params = json.loads(jsStr)
+            jsStr = '{'
+            for row in req.execute("SELECT * FROM codes"):
+                val = row[1].split(',')
+                jsStr += '"' + row[0] + '":['
+                for valStr in val:
+                    jsStr += '"' + valStr + '",'
+                jsStr = jsStr.rstrip(',') + '],'
+            jsStr = jsStr.rstrip(',') + '}'
+            codes = json.loads(jsStr)
+            conn.close()
+            if(oldState != params['lockState']):	# Status changed
+                if(params['lockState'] == 'opened'):	# Lock opened from server
+                     openDoor()
+                else:				# Lock closed from server
+                    closeDoor()
+            dbTime = curTime
+        if curTime >= (doorTime + doorCheckTime) and \
+            params['lockState'] == 'opened' and doorCheckTime != 0:
+            closeDoor()
 
 curTime = millis()
 
