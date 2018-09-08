@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 import RPi.GPIO as GPIO
 import serial
 import time
@@ -17,6 +17,10 @@ start_time = datetime.now()
 
 params = dict()
 codes = dict()
+doorFlag = False
+serialDenied = False
+serialTO = 1000  # mSec
+serialTime = 0
 
 dbName = '/home/pi/LockDB.db'
 
@@ -31,8 +35,18 @@ mqttIP = '192.168.0.200'
 mqttPort = 1883
 mqttFlag = False
 
-port = serial.Serial("/dev/ttyS0", baudrate=9600)
-#port = serial.Serial("/dev/ttyAMA0", baudrate=9600)
+try:
+    port = serial.Serial("/dev/ttyS0", baudrate=9600)
+except:
+    try:
+        port = serial.Serial("/dev/ttyAMA0", baudrate=9600)
+    except:
+        print("Can not connect serial!")
+        quit()
+    else:
+        print("Connected to /dev/ttyAMA0")
+else:
+    print("Connected to /dev/ttyS0")
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(4,GPIO.OUT)
@@ -52,7 +66,7 @@ def onConnect(client, userdata, flags, rc):
     global mqttFlag
     client.subscribe("LOCK/#")
     mqttFlag = True
-    print ("Connected to "+mqttIP) 
+    print ("Connected SUCCESS to "+mqttIP) 
 
 def onMessage(client, userdata, msg):
     global myIP
@@ -172,17 +186,13 @@ def onMessage(client, userdata, msg):
         conn.commit()
         conn.close()
     elif commList[1] == 'SETPARMS':
-        params = json.loads(commList[2])
+        parms = json.loads(commList[2])
         conn = sqlite3.connect(dbName)
         req = conn.cursor()
-        for parName in params.keys():
+        for parName in parms.keys():
             req.execute("UPDATE params SET value = ? \
-                         WHERE name = ?",[params[parName],parName])
+                         WHERE name = ?",[parms[parName],parName])
         conn.commit()
-#        if params['lockState'] == 'opened':
-#            openDoor()
-#        else:
-#            closeDoor(params['lockState'])
         conn.close()
         
 def openDoor(openTime):
@@ -191,23 +201,28 @@ def openDoor(openTime):
     global myIP
     global doorCheckTime
     global doorTime
-    if params['isSound'] == 'True':
-        pygame.mixer.music.stop()
-        pygame.mixer.music.load("/home/pi/Zamknulo.mp3")
-        pygame.mixer.music.play()
-        while (pygame.mixer.music.get_busy() == True ):
-            continue
+    global doorFlag
+    doorFlag = True
     params['lockState']="opened"
     conn = sqlite3.connect(dbName)
     req = conn.cursor()
     req.execute("UPDATE params SET value = 'opened' WHERE name='lockState'")
     conn.commit()
     conn.close()
+    if params['isSound'] == 'True':
+        pygame.mixer.music.stop()
+        while (pygame.mixer.music.get_busy() == True ):
+            continue
+        pygame.mixer.music.load("/home/pi/Zamknulo.mp3")
+        pygame.mixer.music.play(loops=1)
+        while (pygame.mixer.music.get_busy() == True ):
+            continue
     GPIO.output(4,False)
     if mqttFlag:
         client.publish("LOCKASK",myIP + "/OPENED")
     doorTime = millis()
     doorCheckTime = openTime * 1000
+    doorFlag = False
 
 def closeDoor(clStat):
     global dbName
@@ -216,7 +231,9 @@ def closeDoor(clStat):
     global doorTime
     global params
     global mqttFlag
-    if params['isSound'] == 'True':
+    global doorFlag
+    doorFlag = True
+    if params['isSound'] == 'True' and params['lockState'] == 'opened':
         pygame.mixer.music.load("/home/pi/Zamknulo.mp3")
         pygame.mixer.music.play()
         while (pygame.mixer.music.get_busy() == True ):
@@ -239,6 +256,7 @@ def closeDoor(clStat):
         pygame.mixer.music.play(loops=-1)
     doorTime = 0
     doorCheckTime = 0
+    doorFlag = False
 
 def testAccess(Input):
     global dbName
@@ -264,13 +282,23 @@ def testAccess(Input):
 def serialAsk():
     global dbName
     global params
+    global serialDenied
+    global serialTO
+    global serialTime
     while True:
+        curTime = millis()
         portByte = port.readline()
         byte = portByte.decode('utf-8')
+        RDType = byte[2:4]
+        RDValue = str(byte[4:])
+        RDValue = RDValue.strip()
+        if serialDenied and RDType == 'CD':
+            byte = ''
+        if curTime >= (serialTO + serialTime):
+            serialDenied = False
         if (byte != ''):
-            RDType = byte[2:4]
-            RDValue = str(byte[4:])
-            RDValue = RDValue.strip()
+            serialDenied = True
+            serialTime = curTime
             if params['lockState'] == 'closed':
                 if(RDType == 'KB'):			# Key pressed
                     if(int(RDValue) == 10):
@@ -286,7 +314,7 @@ def serialAsk():
                     print (inpSeq)
                     testAccess(inpSeq)
                     inpSeq = ''
-            elif(RDType == 'CD'):
+            elif(params['lockState'] == 'opened'):
                 conn = sqlite3.connect(dbName)
                 req = conn.cursor()
                 req.execute("UPDATE params SET value = 'closed' WHERE name = 'lockState'")
@@ -325,11 +353,16 @@ def checkDB():
             jsStr = jsStr.rstrip(',') + '}'
             codes = json.loads(jsStr)
             conn.close()
-            if(oldState != params['lockState']):	# Status changed
+            if(oldState != params['lockState'] and not doorFlag):	# Status changed
                 if(params['lockState'] == 'opened'):	# Lock opened from server
                     openDoor(0)
                 else:				# Lock closed from server
                     closeDoor(params['lockState'])
+            if params['isSound'] == 'True':
+                if params['lockState'] == 'closed':
+                    pygame.mixer.music.play(loops=-1)
+            else:
+                pygame.mixer.music.stop()
             dbTime = curTime
         if curTime >= (doorTime + doorCheckTime) and \
             params['lockState'] == 'opened' and doorCheckTime != 0:
@@ -345,7 +378,6 @@ def mqttSetup():
     except:
         print ("Can not connect")
     else: 
-        print ('Loop starting')
         client.loop_start()
 
 conn = sqlite3.connect(dbName)
@@ -372,7 +404,7 @@ else:
     doorCheckTime = 0
     openDoor(0)
 
-print (myIP)
+print ("My IP Addres = " + myIP)
 
 client = mqtt.Client()
 client.on_connect = onConnect
